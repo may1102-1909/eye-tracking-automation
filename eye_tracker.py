@@ -1,15 +1,15 @@
 """
 =============================================================================
-AEROPRECISE PRO - ENTERPRISE HANDS-FREE EYE & GAZE CONTROLLER
+AEROPRECISE PRO - ULTIMATE HANDS-FREE EYE & GAZE CONTROLLER
 =============================================================================
-Incorporating:
-1. 🎯 Verified Ultra-Precise Click System (Single Blink, Double Blink, Right Wink, Dwell)
-2. 🎛️ Eyebrow-Raised Quick Action Radial Pie Menu (Raise Eyebrow to Open/Close)
-3. 🔍 3x Precision Gaze Magnifier Scope (Key [Z] or Menu)
-4. 🔊 Non-Blocking Audio Acoustic Clicks & Chimes
-5. 📜 Hands-Free Smooth Page Scrolling (Edge Gaze & Mouth Aperture Detection)
-6. 🪟 Full Hands-Free Drag & Drop Mode (Double-Wink Grab & Release)
-7. 🎯 Smart Target Magnetism (Zero-Drift Micro-Fixation Lock)
+Features Included:
+1. 🎯 Ultra-Responsive Single Blink (Left Click) & Double Blink (Double Click)
+2. 🔊 Non-Blocking Audio Acoustic Clicks (Clicks, Double Clicks, Drag Chimes)
+3. 📜 Hands-Free Smooth Page Scrolling (Edge Gaze & Mouth Aperture Detection)
+4. 🪟 Full Hands-Free Drag & Drop Mode (Double-Wink Grab & Release)
+5. 🎯 Smart Target Magnetism (Fixation Anchor Snap for Pinpoint UI Accuracy)
+6. 🔍 Gaze Magnifier & Precision Zoom Mode (Micro-Targeting Scope)
+7. 🎛️ Quick-Action Radial Pie Menu (Eyebrow Raise Trigger: Copy, Paste, Alt+Tab, etc.)
 =============================================================================
 """
 
@@ -106,7 +106,7 @@ class SoundFX:
     def play_chime():
         if HAS_WINSOUND:
             def _beep():
-                for freq in (900, 1300, 1700):
+                for freq in (900, 1200, 1600):
                     winsound.Beep(freq, 25)
                     time.sleep(0.02)
             threading.Thread(target=_beep, daemon=True).start()
@@ -161,15 +161,17 @@ class Config:
     
     # Scrolling settings
     SCROLL_SPEED = 28
-    EDGE_SCROLL_MARGIN = 0.12  # Top/bottom 12% of screen triggers scroll
+    EDGE_SCROLL_MARGIN = 0.12
     
-    # Blink & Wink Thresholds (Original Proven Values)
-    EAR_THRESHOLD = 0.19
-    SINGLE_BLINK_MAX = 0.40
-    DOUBLE_CLICK_WINDOW = 0.40
+    # High-Sensitivity Blink & Wink Thresholds
+    EAR_CLOSED_THRESHOLD = 0.215   # Optimized for effortless blink detection
+    BLINK_SCORE_THRESHOLD = 0.40   # MediaPipe blendshape probability
     
-    # Eyebrow Raise Sensitivity (For Menu)
-    BROW_RAISE_THRESHOLD = 0.35
+    MIN_BLINK_DURATION = 0.04      # 40ms minimum blink duration
+    MAX_BLINK_DURATION = 0.55      # 550ms max for natural blink
+    DOUBLE_CLICK_WINDOW = 0.35     # Time to wait for second blink before single click
+    
+    BROW_RAISE_THRESHOLD = 0.50
     
     BORDER_MARGIN = 5
 
@@ -195,26 +197,22 @@ class SmartMagneticFilter:
     def update(self, target_x, target_y):
         dist = math.hypot(target_x - self.anchor_x, target_y - self.anchor_y)
 
-        # Smart Magnetism: Lock firmly onto target during fixations
         if dist <= Config.DEADZONE_RADIUS:
             self.is_magnetized = True
             out_x = self.anchor_x
             out_y = self.anchor_y
         elif dist <= Config.MAGNETIC_SNAP_RADIUS:
-            # Magnetic attraction: dampens 80% of micro-drift
             self.is_magnetized = True
             out_x = self.anchor_x * 0.80 + target_x * 0.20
             out_y = self.anchor_y * 0.80 + target_y * 0.20
             self.cursor_x = out_x
             self.cursor_y = out_y
         else:
-            # Deliberate movement: Break magnetic lock and accelerate
             self.is_magnetized = False
             dynamic_alpha = min(1.0, Config.BASE_SMOOTHING_ALPHA * (1.0 + dist / 120.0))
             self.cursor_x += (target_x - self.cursor_x) * dynamic_alpha
             self.cursor_y += (target_y - self.cursor_y) * dynamic_alpha
             
-            # Slide anchor point
             shift = dist - Config.DEADZONE_RADIUS
             angle = math.atan2(target_y - self.anchor_y, target_x - self.anchor_x)
             self.anchor_x += math.cos(angle) * shift * 0.45
@@ -243,7 +241,7 @@ def calculate_ear(landmarks, eye_indices, w, h):
 
 
 # ==========================================
-# 6. MASTER CONTROLLER
+# 6. MASTER CONTROLLER (OPTIMIZED BLINK & CLICK)
 # ==========================================
 class HandsFreeControllerPro:
     LEFT_EYE_LANDMARKS = [33, 160, 158, 133, 153, 144]
@@ -273,11 +271,13 @@ class HandsFreeControllerPro:
         self.base_nose_y = 0.50
         self.is_magnetized = True
         
-        # Gesture States (Original Proven Logic)
+        # Robust Dual-Blink State Machine
         self.blink_start_time = None
-        self.last_blink_release_time = 0.0
-        self.pending_single_click = None
+        self.last_blink_end_time = 0.0
+        self.pending_single_click = False
+        self.pending_click_start_time = 0.0
         self.both_closed_start = None
+        self.is_currently_blinking = False
         
         # Left Wink (Drag & Drop State Machine)
         self.left_closed_start = None
@@ -302,7 +302,6 @@ class HandsFreeControllerPro:
         self.radial_hover_start = None
         self.radial_hover_progress = 0.0
         self.brow_raised_prev = False
-        self.brow_score = 0.0
         
         # UI Alerts
         self.action_alert = ""
@@ -353,25 +352,25 @@ class HandsFreeControllerPro:
         h, w, _ = frame.shape
         curr_time = time.time()
 
-        # Step A: Compute Eye Aspect Ratio (EAR) & Blendshapes
+        # Step A: Hybrid EAR + Neural Blendshape Eye Closure Detection
         left_ear = calculate_ear(landmarks, self.LEFT_EYE_LANDMARKS, w, h)
         right_ear = calculate_ear(landmarks, self.RIGHT_EYE_LANDMARKS, w, h)
 
-        left_eye_closed = left_ear < Config.EAR_THRESHOLD
-        right_eye_closed = right_ear < Config.EAR_THRESHOLD
-        both_eyes_closed = left_eye_closed and right_eye_closed
-
+        left_blink_score = 0.0
+        right_blink_score = 0.0
         jaw_open = 0.0
-        self.brow_score = 0.0
+        brow_inner_up = 0.0
+
         if blendshapes:
             bs = {cat.category_name: cat.score for cat in blendshapes}
+            left_blink_score = bs.get('eyeBlinkLeft', 0.0)
+            right_blink_score = bs.get('eyeBlinkRight', 0.0)
             jaw_open = bs.get('jawOpen', 0.0)
-            self.brow_score = max(bs.get('browInnerUp', 0.0), bs.get('browOuterUpLeft', 0.0), bs.get('browOuterUpRight', 0.0))
-            if bs.get('eyeBlinkLeft', 0) > 0.50:
-                left_eye_closed = True
-            if bs.get('eyeBlinkRight', 0) > 0.50:
-                right_eye_closed = True
-            both_eyes_closed = left_eye_closed and right_eye_closed
+            brow_inner_up = bs.get('browInnerUp', 0.0)
+
+        left_eye_closed = (left_ear < Config.EAR_CLOSED_THRESHOLD) or (left_blink_score > Config.BLINK_SCORE_THRESHOLD)
+        right_eye_closed = (right_ear < Config.EAR_CLOSED_THRESHOLD) or (right_blink_score > Config.BLINK_SCORE_THRESHOLD)
+        both_eyes_closed = left_eye_closed and right_eye_closed
 
         nose = landmarks[self.NOSE_TIP]
 
@@ -409,10 +408,10 @@ class HandsFreeControllerPro:
         if self.is_paused:
             cv2.putText(frame, "=== TRACKING PAUSED ===", (w // 2 - 170, h // 2),
                         cv2.FONT_HERSHEY_DUPLEX, 0.8, (0, 0, 255), 2)
-            return self.draw_hud(frame, left_ear, right_ear, left_eye_closed, right_eye_closed)
+            return self.draw_hud(frame, left_ear, right_ear, left_eye_closed, right_eye_closed, False)
 
-        # Step D: Eyebrow Raise Radial Menu Toggle
-        is_brow_raised = self.brow_score > Config.BROW_RAISE_THRESHOLD
+        # Step D: Radial Pie Menu Activation (Eyebrows Raised)
+        is_brow_raised = brow_inner_up > Config.BROW_RAISE_THRESHOLD
         if is_brow_raised and not self.brow_raised_prev:
             self.is_radial_menu_open = not self.is_radial_menu_open
             SoundFX.play_chime()
@@ -435,7 +434,6 @@ class HandsFreeControllerPro:
         target_x = SCREEN_CENTER_X + dx
         target_y = SCREEN_CENTER_Y + dy
 
-        # If Radial Menu is open, steer slice selection hands-free
         if self.is_radial_menu_open:
             slice_idx = self.calculate_radial_slice(dx_rel * 400.0, dy_rel * 400.0)
             if slice_idx is not None:
@@ -459,12 +457,12 @@ class HandsFreeControllerPro:
 
             self.draw_debug_overlay(frame, landmarks, w, h)
             self.draw_radial_pie_menu(frame, w, h)
-            return self.draw_hud(frame, left_ear, right_ear, left_eye_closed, right_eye_closed)
+            return self.draw_hud(frame, left_ear, right_ear, left_eye_closed, right_eye_closed, False)
 
         cursor_x, cursor_y, self.is_magnetized = self.filter.update(target_x, target_y)
         pyautogui.moveTo(cursor_x, cursor_y)
 
-        # Step F: Smooth Page Scrolling
+        # Step F: Hands-Free Smooth Page Scrolling
         self.is_scrolling = False
         if not self.is_dragging:
             if jaw_open > 0.42:
@@ -480,14 +478,47 @@ class HandsFreeControllerPro:
                 self.is_scrolling = True
                 self.trigger_action("SCROLL DOWN (EDGE)")
 
-        # Step G: Drag & Drop (Double Left-Wink)
-        if left_eye_closed and not right_eye_closed:
+        # Step G: ULTRA-RESPONSIVE SINGLE & DOUBLE BLINK ENGINE
+        self.is_currently_blinking = False
+
+        if both_eyes_closed:
+            self.is_currently_blinking = True
+            if self.blink_start_time is None:
+                self.blink_start_time = curr_time
+        else:
+            if self.blink_start_time is not None:
+                blink_duration = curr_time - self.blink_start_time
+                self.blink_start_time = None
+
+                if Config.MIN_BLINK_DURATION <= blink_duration <= Config.MAX_BLINK_DURATION:
+                    if self.pending_single_click and (curr_time - self.last_blink_end_time <= Config.DOUBLE_CLICK_WINDOW):
+                        pyautogui.doubleClick()
+                        SoundFX.play_double_click()
+                        self.trigger_action("DOUBLE CLICK!")
+                        self.pending_single_click = False
+                        self.last_blink_end_time = 0.0
+                    else:
+                        self.pending_single_click = True
+                        self.pending_click_start_time = curr_time
+                        self.last_blink_end_time = curr_time
+
+        if self.pending_single_click:
+            if curr_time - self.pending_click_start_time > Config.DOUBLE_CLICK_WINDOW:
+                if not self.is_dragging:
+                    pyautogui.click(button='left')
+                    SoundFX.play_click()
+                    self.trigger_action("SINGLE CLICK!")
+                self.pending_single_click = False
+
+        # Step H: Left Wink (Drag & Drop Mode: Double Left-Wink)
+        is_isolated_left_wink = left_eye_closed and not right_eye_closed and (right_ear > 0.23 or right_blink_score < 0.25)
+        if is_isolated_left_wink:
             if self.left_closed_start is None:
                 self.left_closed_start = curr_time
         else:
             if self.left_closed_start is not None:
                 duration = curr_time - self.left_closed_start
-                if 0.20 <= duration <= 0.70:
+                if 0.18 <= duration <= 0.70:
                     if curr_time - self.last_left_wink_release <= 0.55:
                         self.is_dragging = not self.is_dragging
                         if self.is_dragging:
@@ -503,43 +534,15 @@ class HandsFreeControllerPro:
                         self.last_left_wink_release = curr_time
                 self.left_closed_start = None
 
-        # Step H: PROVEN SINGLE & DOUBLE BLINK ENGINE
-        if both_eyes_closed:
-            if self.blink_start_time is None:
-                self.blink_start_time = curr_time
-        else:
-            if self.blink_start_time is not None:
-                duration = curr_time - self.blink_start_time
-                self.blink_start_time = None
-
-                if 0.05 <= duration <= Config.SINGLE_BLINK_MAX:
-                    if curr_time - self.last_blink_release_time <= Config.DOUBLE_CLICK_WINDOW:
-                        pyautogui.doubleClick()
-                        SoundFX.play_double_click()
-                        self.trigger_action("DOUBLE CLICK!")
-                        self.pending_single_click = None
-                        self.last_blink_release_time = 0.0
-                    else:
-                        self.last_blink_release_time = curr_time
-                        self.pending_single_click = curr_time
-
-        # Flush single click after window expires
-        if self.pending_single_click is not None:
-            if curr_time - self.pending_single_click > Config.DOUBLE_CLICK_WINDOW:
-                if not self.is_dragging:
-                    pyautogui.click(button='left')
-                    SoundFX.play_click()
-                    self.trigger_action("SINGLE CLICK!")
-                self.pending_single_click = None
-
-        # Right Wink -> Right Click
-        if right_eye_closed and not left_eye_closed:
+        # Step I: Right Wink -> Right Click
+        is_isolated_right_wink = right_eye_closed and not left_eye_closed and (left_ear > 0.23 or left_blink_score < 0.25)
+        if is_isolated_right_wink:
             if self.right_closed_start is None:
                 self.right_closed_start = curr_time
         else:
             if self.right_closed_start is not None:
                 duration = curr_time - self.right_closed_start
-                if 0.22 <= duration <= 0.75:
+                if 0.20 <= duration <= 0.75:
                     if self.is_dragging:
                         pyautogui.mouseUp()
                         self.is_dragging = False
@@ -548,8 +551,8 @@ class HandsFreeControllerPro:
                     self.trigger_action("RIGHT CLICK!")
                 self.right_closed_start = None
 
-        # Dwell Click (Hover 0.9s to auto-click)
-        if Config.DWELL_ENABLED and not self.is_dragging and not self.is_scrolling:
+        # Step J: Dwell Click (Hover 0.9s to auto-click)
+        if Config.DWELL_ENABLED and not self.is_dragging and not self.is_scrolling and not self.is_currently_blinking:
             curr_pos = (cursor_x, cursor_y)
             dist_from_anchor = math.hypot(curr_pos[0] - self.dwell_anchor_pos[0],
                                           curr_pos[1] - self.dwell_anchor_pos[1])
@@ -577,7 +580,7 @@ class HandsFreeControllerPro:
         if self.is_zoom_mode:
             self.draw_precision_zoom_scope(frame, landmarks, w, h)
 
-        return self.draw_hud(frame, left_ear, right_ear, left_eye_closed, right_eye_closed)
+        return self.draw_hud(frame, left_ear, right_ear, left_eye_closed, right_eye_closed, self.is_currently_blinking)
 
     def calculate_radial_slice(self, vec_x, vec_y):
         dist = math.hypot(vec_x, vec_y)
@@ -675,34 +678,33 @@ class HandsFreeControllerPro:
         cv2.rectangle(frame, (bar_x, bar_y), (bar_x + int(bar_w * progress), bar_y + 16), (0, 255, 180), -1)
         return frame
 
-    def draw_hud(self, frame, left_ear, right_ear, left_closed, right_closed):
+    def draw_hud(self, frame, left_ear, right_ear, left_closed, right_closed, is_blinking):
         h, w, _ = frame.shape
         overlay = frame.copy()
         cv2.rectangle(overlay, (0, 0), (w, 55), (18, 18, 22), -1)
         cv2.rectangle(overlay, (0, h - 35), (w, h), (18, 18, 22), -1)
         cv2.addWeighted(overlay, 0.80, frame, 0.20, 0, frame)
 
-        cv2.putText(frame, "AEROPRECISE PRO AI", (12, 22), cv2.FONT_HERSHEY_DUPLEX, 0.52, (0, 220, 255), 1)
+        cv2.putText(frame, "AEROPRECISE PRO AI", (12, 25), cv2.FONT_HERSHEY_DUPLEX, 0.55, (0, 220, 255), 1)
         
-        # Real-time Eyebrow Lift Telemetry Meter
-        brow_pct = int(self.brow_score * 100.0)
-        brow_color = (0, 255, 0) if self.brow_score > Config.BROW_RAISE_THRESHOLD else (180, 180, 180)
-        cv2.putText(frame, f"BROW: {brow_pct}%", (12, 44), cv2.FONT_HERSHEY_SIMPLEX, 0.38, brow_color, 1)
-
-        # Status Badge
-        if self.is_zoom_mode:
-            cv2.putText(frame, "[PRECISION 3x ZOOM]", (110, 44), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (0, 255, 255), 1)
+        # Real-time Blink / Status Badge
+        if is_blinking:
+            cv2.putText(frame, "[BLINKING...]", (12, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 255, 255), 1)
+        elif self.pending_single_click:
+            cv2.putText(frame, "[BLINK 1 -> DOUBLE?]", (12, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 220, 100), 1)
+        elif self.is_zoom_mode:
+            cv2.putText(frame, "[PRECISION 3x ZOOM]", (12, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (0, 255, 255), 1)
         else:
             mag_badge = "[MAGNETIC SNAP: LOCKED]" if self.is_magnetized else "[ACTIVE: MOVING]"
             badge_color = (0, 255, 0) if self.is_magnetized else (0, 165, 255)
-            cv2.putText(frame, mag_badge, (110, 44), cv2.FONT_HERSHEY_SIMPLEX, 0.40, badge_color, 1)
+            cv2.putText(frame, mag_badge, (12, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.40, badge_color, 1)
 
         if self.is_dragging:
             cv2.rectangle(frame, (w // 2 - 75, 60), (w // 2 + 75, 85), (0, 0, 200), -1)
             cv2.putText(frame, "DRAG LOCKED", (w // 2 - 60, 78), cv2.FONT_HERSHEY_DUPLEX, 0.50, (255, 255, 255), 1)
 
         if time.time() - self.action_alert_time < 1.0:
-            cv2.putText(frame, self.action_alert, (w // 2 - 110, 36), cv2.FONT_HERSHEY_DUPLEX, 0.65, (0, 255, 0), 2)
+            cv2.putText(frame, self.action_alert, (w // 2 - 100, 36), cv2.FONT_HERSHEY_DUPLEX, 0.70, (0, 255, 0), 2)
 
         # Real-time EAR Gauges
         l_color = (0, 0, 255) if left_closed else (0, 255, 0)
@@ -723,7 +725,7 @@ class HandsFreeControllerPro:
             cv2.ellipse(frame, dwell_center, (18, 18), 0, -90, -90 + angle, (0, 255, 255), 3)
             cv2.putText(frame, "DWELL", (65, h - 65), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
 
-        help_text = "Raise Brows: Menu | [Z] Zoom | [C] Center | [P] Pause | [Q] Quit"
+        help_text = "[Z] Zoom 3x | [M] Radial Menu | [C] Center | [P] Pause | [Q] Quit"
         cv2.putText(frame, help_text, (10, h - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (180, 180, 180), 1)
         return frame
 
@@ -733,20 +735,20 @@ class HandsFreeControllerPro:
 # ==========================================
 def main():
     print("==================================================")
-    print("     AEROPRECISE PRO - ULTIMATE HANDS-FREE AI     ")
+    print("     AEROPRECISE PRO - HIGH SENSITIVITY CLICKS    ")
     print("==================================================")
-    print("-> Controls & Gestures:")
-    print("   * 👁️ Single Blink           -> SINGLE CLICK")
-    print("   * 👁️ 2 Rapid Blinks (.40s)   -> DOUBLE CLICK")
-    print("   * 😉 Right Wink               -> RIGHT CLICK")
-    print("   * 🎯 Dwell Hover (0.9s)       -> DWELL CLICK")
-    print("   * 🤨 Raise Eyebrows / [M]     -> Radial Pie Menu")
-    print("   * 🔍 Key [Z]                  -> 3x Precision Zoom Scope")
-    print("   * 😉 2 Left Winks             -> Drag & Drop Grab/Release")
-    print("   * 😮 Open Mouth / Edge Look   -> Smooth Page Scroll")
-    print("   * Key [C]                     -> Re-Center Calibration")
-    print("   * Key [P]                     -> Pause / Resume")
-    print("   * Key [Q] / [ESC]             -> Quit")
+    print("-> Click Controls:")
+    print("   * 1 Blink (Natural)          -> SINGLE CLICK")
+    print("   * 2 Rapid Blinks (within .35s)-> DOUBLE CLICK")
+    print("   * Right Wink                 -> RIGHT CLICK")
+    print("   * Dwell Hover (0.9s)         -> AUTO CLICK")
+    print("-> Other Controls:")
+    print("   * 2 Left Winks               -> Drag & Drop Grab/Release")
+    print("   * Mouth Open / Edge Look     -> Smooth Scrolling")
+    print("   * Eyebrows Raised / Key [M]  -> Radial Pie Menu")
+    print("   * Key [Z]                    -> 3x Precision Zoom Scope")
+    print("   * Key [C]                    -> Re-Center Calibration")
+    print("   * Key [P]                    -> Pause / Resume Toggle")
     print("==================================================")
 
     BaseOptions = mp.tasks.BaseOptions
